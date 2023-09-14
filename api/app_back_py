@@ -1,0 +1,134 @@
+import os
+import datetime
+from functions import codigo_padrao, obtendo_dados_processo_e_advogados
+from get_cellphone import get_urlTJ, get_cells, clean_data_cell, time
+from gpt_summarizer import summarize
+from datas_tribs import tribunal, re_processos, peritos_negativos, peritos_positivas, keyword_negativas, keyword_positivas, re_tribs
+from data_csv import pd, get_existing_phones, spliting_dataframes
+from whatsapp_api_client_python import API
+
+
+idInstance = os.environ.get('idInstance')
+apiTokenInstance = os.environ.get('apiTokenInstance')
+greenAPI = API.GreenApi(idInstance, apiTokenInstance)
+
+data_df = pd.read_csv('/app/data/data_df.csv', sep=',')
+
+hoje = datetime.datetime.now().strftime('%d-%m-%Y')
+processos = phones_in_db = phones_to_search = phones_found = phones_not_found = successful_messages = 0
+
+try:
+    urlTJ = get_urlTJ()
+except Exception as e:
+    print('Erro ao obter a URL do TJDFT:', str(e))
+
+urls = [urlTJ, 'https://diario.jt.jus.br/cadernos/Diario_J_18.pdf']
+
+print('Obtendo dados dos processos.')
+lista_total_html_TJDFT = codigo_padrao(urls[0],tribunal[0], re_processos[0], peritos_positivas[0], peritos_negativos, keyword_positivas, keyword_negativas)
+
+dados_TJDFT = obtendo_dados_processo_e_advogados(lista_total_html_TJDFT, re_tribs[0])
+
+df_TJDFT = pd.DataFrame(dados_TJDFT, columns=['UF', 'OAB', 'Nome', 'N_Processo', 'T_Processo'])
+df_TJDFT = df_TJDFT[['Nome', 'OAB', 'UF', 'N_Processo', 'T_Processo']]
+df_TJDFT.drop_duplicates(inplace=True, ignore_index=True)
+processos += len(df_TJDFT)
+
+
+lista_total_html_TRT18 = codigo_padrao(urls[1], tribunal[1], re_processos[1], peritos_positivas[1], peritos_negativos, keyword_positivas, keyword_negativas)
+
+dados_TRT18 = obtendo_dados_processo_e_advogados(lista_total_html_TRT18, re_tribs[1])
+
+df_TRT18 = pd.DataFrame(dados_TRT18, columns=['Nome', 'OAB', 'UF', 'N_Processo', 'T_Processo'])
+df_TRT18.drop_duplicates(inplace=True, ignore_index=True)
+processos += len(df_TRT18)
+
+df = pd.concat([df_TJDFT, df_TRT18], ignore_index=True)
+
+# df.to_csv('/app/data/df.csv', index=False)
+df['autorizado'] = '1'
+df['telefone'] = ' '
+# df = pd.read_csv('/app/data/df.csv', sep=',')
+df = df.applymap(str)
+
+print('Verificando se alguma linha já tem número no csv')
+get_existing_phones(df, data_df)
+
+print('Separando o datafreme em dois a partir daas linhas que tem número e das que não tem')
+df_to_add_phone, df_with_phone = spliting_dataframes(df)
+phones_to_search += len(df_to_add_phone)
+print(phones_to_search)
+phones_in_db += len(df_with_phone)
+print(phones_in_db)
+
+print('Buscando os números de celular.')
+df_new_phones = get_cells(df_to_add_phone)
+
+print('Tratando os números de celular recem obtidos.')
+df_new_phones = df_new_phones.applymap(str)
+clean_data_cell(df_new_phones)
+
+phones_found = len(df_new_phones[df_new_phones['telefone'] != 'Não encontrado'])
+print(f'Tefones encontrados: {phones_found}')
+phones_not_found = len(df_new_phones[df_new_phones['telefone'] == 'Não encontrado'])
+print(f'Tefones não encontrados: {phones_not_found}')
+
+print('Juntando os dataframes com nº antigos e novos')
+df_new = pd.concat([df_with_phone, df_new_phones], ignore_index=True)
+
+# df = pd.read_csv('/app/data/df.csv', sep=',')
+# df_new = pd.concat([df_new, df], ignore_index=True)
+
+print('Resumindo os processos com o chat GPT.')
+summarize(df_new)
+
+df_new = df_new.applymap(str)
+
+data_df = pd.concat([data_df, df_new], ignore_index=True)
+data_df.drop_duplicates(inplace=True, ignore_index=True)
+data_df.to_csv('/app/data/data_df.csv', index=False)
+
+print('Aguardando dar 09hs para começar a enviar as mensagens.')
+while True:
+    agora = datetime.datetime.now()
+
+    if agora.hour >= 9:
+        break
+
+    tempo_restante = datetime.datetime(agora.year, agora.month, agora.day, 9, 0, 0) - agora
+    tempo_restante_segundos = tempo_restante.total_seconds()
+    time.sleep(tempo_restante_segundos)
+
+# df_new = pd.read_csv('/app/data/df.csv', sep=',')
+# df_new = df_new.applymap(str)
+
+print('Enviando mensagens.')
+template_texto = 'Dr(a). {}, houve uma nomeação no processo {}.\n Digite 1 - Caso deseje ver um resumo da nomeação feito pelo chat GPT.\n Digite 2 - Caso deseje saber sobre o nosso programa de afiliados com até 15% de comissão por indicação e 5% de desconto para o cliente.\nDigite 3 - Caso não queira mais receber atualizações do nosso push.'
+successful_messages = 0
+for i in df_new.index:
+    if df_new.telefone[i] != 'Não encontrado' and df_new.autorizado[i] == '1':
+        response = greenAPI.sending.sendMessage('55'+f'{df_new.telefone[i]}@c.us', template_texto.format(df_new.Nome[i].capitalize(), df_new.N_Processo[i]))
+        if response.code == 200:
+            successful_messages += 1
+
+metricas_busca_ativa = {
+    'Data': hoje,
+    'Processos': processos,
+    'Telefones no banco de dados' : phones_in_db,
+    'Telefones a serem procurados' : phones_to_search,
+    'Telefones_Encontrados': phones_found,
+    'Telefones_Nao_Encontrados': phones_not_found,
+    'Mensagens_Enviadas': successful_messages
+}
+
+metricas_busca_ativa_df = pd.DataFrame([metricas_busca_ativa])
+try: 
+    metricas_busca_ativa_db = pd.read_csv('/app/data/metricas_busca_ativa.csv', sep=',')
+    if metricas_busca_ativa_df['Data'][0] == metricas_busca_ativa_db['Data'][0]:
+        metricas_busca_ativa_df.to_csv('/app/data/metricas_escuta.csv', index=False)
+    else:
+        metricas_busca_ativa_db = pd.concat([metricas_busca_ativa_db, metricas_busca_ativa_df], ignore_index=True)
+        metricas_busca_ativa_db.to_csv('/app/data/metricas_busca_ativa.csv', index=False)
+except:
+    metricas_busca_ativa_df.to_csv('/app/data/metricas_busca_ativa.csv', index=False)
+    

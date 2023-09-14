@@ -1,0 +1,49 @@
+version: "3.8"
+services:
+  api:
+    container_name: busca_ativa
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - TZ=America/Sao_Paulo
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+    env_file:
+      - .env
+  listener:
+    container_name: listener
+    build:
+      context: ./listener
+      dockerfile: Dockerfile
+    environment:
+      - TZ=America/Sao_Paulo
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+    command: gunicorn -b :5000 app:app
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+  dashboard:
+    container_name: dashboard
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    environment:
+      - TZ=America/Sao_Paulo
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+    command: gunicorn -b :5001 app:app
+    ports:
+      - "5001:5001"
+    env_file:
+      - .env
+volumes:
+  data:
